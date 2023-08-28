@@ -14,13 +14,14 @@ import base64
 import os
 import multiprocessing
 import logging
-
+import operate_mysql
 import logging.config
 
 logging.config.fileConfig('logging.config')
 logging = logging.getLogger("applog")
 
 
+# 帧对象，包括这一帧的数组，出现帧数，视频速率
 class frame_object(object):
     def __init__(self, frame, number, rate):
         self.frame = frame
@@ -55,7 +56,7 @@ def insert_value(taskId, name, target_image, appear_time, hit, end_time, task_st
         if len(results) == 0:
             logging.error("初始化任务记录taskId:{}不存在".format(taskId))
         if task_status == -1:
-            sql = "update face_identify_result set task_status = %s" %(task_status)
+            sql = "update face_identify_result set task_status = %s" % (task_status)
             cursor.execute(sql)
         appear_time_saved = results[0][4]
         if appear_time_saved is None or appear_time is None:
@@ -92,15 +93,15 @@ def paramater_check(video_path, npy_target_path, taskId):
 def image_compress_encoding(image):
     # 等比例压缩
     height, width, channel = image.shape
+    # 指定要压缩的宽高
     size_decrease = (int(width / 2), int(height / 2))
+    # 讲图片宽高压缩至一半
     image = cv2.resize(image, size_decrease, interpolation=cv2.INTER_AREA)
+    # 写入成功返回两个值，第一个值为True，第二个为数组，这里只选择数组
     image_encode = cv2.imencode('.jpg', np.asarray(image))[1]
-    target_image = str(base64.b64encode(image_encode))[2:]
+    # 将图像转为base64字符串并去掉python加上的b'******'
+    target_image = str(base64.b64encode(image_encode))[2:-1]
     return target_image
-
-
-
-
 
 
 def video_spilt(queue, stop_event, error_event, video_path):
@@ -119,20 +120,18 @@ def video_spilt(queue, stop_event, error_event, video_path):
             raise ValueError("未能正确读取视频/摄像头,请检查地址")
         frame_num = 0  # frame_num 总帧数
         while True:
-            if error_event.is_set():
-                logging.info("进程{}检测到错误标志,跳出循环".format(os.getpid()))
-                break
             ref, frame = capture.read()
-            frame_o = frame_object(frame, frame_num, rate)
+            frame_object = frame_object(frame, frame_num, rate)
+            # 视频结束退出
             if not ref:
                 break
+            # 检查队列是否满了，满了等待或检查程序提前退出
             while queue.full():
                 if stop_event.is_set():
                     break
-                time.sleep(0.1)
             if stop_event.is_set():
                 break
-            queue.put(frame_o)
+            queue.put(frame_object)
             frame_num += 1
         logging.debug("进程{}图像拆分完毕".format(os.getpid()))
         capture.release()
@@ -189,8 +188,9 @@ def predict_function(queue, stop_event, error_event, lock, mode, video_path=None
             r_image, names = retinaface.detect_image(image, facenet_threhold)
             save_image = r_image
             r_image = cv2.cvtColor(r_image, cv2.COLOR_RGB2BGR)
-
+            # 将图片展示
             # cv2.imshow("after", r_image)
+            # cv2.waitKey(1)
             # cv2.imwrite(dir_save_path, r_image)
             for name in names:
                 if name != "Unknown":
@@ -213,11 +213,19 @@ def predict_function(queue, stop_event, error_event, lock, mode, video_path=None
                 if stop_event.is_set():
                     logging.debug("进程{}检测到停止标志目标已捕获,跳出循环".format(os.getpid()))
                     break
-                frame_object = queue.get()
-                if frame_object is None:
+                index = 0
+                for _ in range(5):
+                    try:
+                        frame_object = queue.get(True, 1)
+                        index = 0
+                        break
+                    except:
+                        index = index + 1
+                        if index > 4:
+                            break
+                if index > 4:
                     break
                 frame = frame_object.frame
-                frame_num = frame_object.frame_num
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 # 进行检测
                 frame, names = retinaface.detect_image(frame, facenet_threhold)
@@ -234,9 +242,7 @@ def predict_function(queue, stop_event, error_event, lock, mode, video_path=None
                         end_time = round(time.time())
                         appear_time = frame_object.frame_num / frame_object.rate
                         logging.info("进程{}捕获目标人物{},时间{}s".format(os.getpid(), name, appear_time))
-                        lock.acquire()
                         insert_value(taskId, name, target_image, appear_time, hit, end_time, task_status)
-                        lock.release()
                         break
                 if hit == 1:
                     stop_event.set()
@@ -247,6 +253,7 @@ def predict_function(queue, stop_event, error_event, lock, mode, video_path=None
     except Exception as e:
         logging.error(e)
         error_event.set()
+
 
 if __name__ == "__main__":
     # 创建ArgumentParser对象
@@ -270,7 +277,6 @@ if __name__ == "__main__":
             "任务id{},清晰度阈值{},线程数量{},设备{}".format(args.taskId, args.facenet_threhold, args.num_workers, args.device))
         num_workers = args.num_workers  # 并行进程数量
         manager = multiprocessing.Manager()
-        lock = manager.Lock()
         queue = manager.Queue(500)
         stop_event = multiprocessing.Event()
         error_event = multiprocessing.Event()
@@ -280,39 +286,32 @@ if __name__ == "__main__":
         workers = []
         for _ in range(num_workers):
             worker = multiprocessing.Process(target=predict_function,
-                                             args=(queue, stop_event,error_event, lock, args.mode, args.video_path,
+                                             args=(queue, stop_event, error_event, args.mode, args.video_path,
                                                    args.taskId,
                                                    args.facenet_threhold, args.npy_target_path, args.device))
 
-            worker.start()
-            workers.append(worker)
-        while True:
-            time.sleep(5)
-            logging.debug(split_pro.is_alive())
             if not split_pro.is_alive():
                 break
-
         split_pro.join()
-        for _ in range(num_workers):
-            if queue.full():
-                break
-            queue.put(None)
+        logging.debug("视频拆分完毕")
         for worker in workers:
             worker.join()
-
         et = time.time()
-        logging.debug("总预测时间".format(et - st))
+        logging.debug("总预测时间{}".format(et - st))
         logging.debug(stop_event.is_set())
+        # 如果拆分子进程中途发生错误，将任务状态设为-1，并插入数据库
         if error_event.is_set():
             task_status = -1
             insert_value(taskId=args.taskId, name=None, target_image=None, appear_time=None,
                          hit=0, end_time=None, task_status=task_status)
+        # 如果没找到目标人物，将任务状态设为1，并插入数据库
         elif not stop_event.is_set():
             logging.info("任务{},未找到目标,预测结束".format(args.taskId))
             task_status = 1
             logging.debug(stop_event.is_set())
             insert_value(taskId=args.taskId, name=None, target_image=None, appear_time=None,
                          hit=0, end_time=et, task_status=task_status)
+        # 如果程序中途发生错误，将任务状态设为-1，并插入数据库
     except Exception as e:
         task_status = -1
         logging.error(e)
