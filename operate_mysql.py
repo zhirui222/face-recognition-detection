@@ -18,7 +18,7 @@ class do_mysql(object):
                                user=user,
                                password=password,
                                database=database,
-                               charset=charset,
+                               charset=charset
                                )
         self.conn = conn
 
@@ -30,7 +30,7 @@ class do_mysql(object):
         sql = "insert into {}({}) VALUES({})".format(table_name, keys, values)
         cursor.execute(sql, kwargs)
         conn.commit()
-        conn.close()
+
 
     def update(self, table_name, conditions=None, **kwargs):
         conn = self.conn
@@ -42,10 +42,9 @@ class do_mysql(object):
             convalue = ' and'.join('`{}`=%({})s'.format(item[0], item[0]) for item in conditions.items())
             condition = 'where {}'.format(convalue)
         sql = """update %s set %s %s""" % (table_name, cols, condition)
-        print(sql)
         cursor.execute(sql, kwargs)
         conn.commit()
-        conn.close()
+
 
     def select(self, table_name, conditions=None):
         conn = self.conn
@@ -61,5 +60,4 @@ class do_mysql(object):
             cursor.execute(sql)
         result = cursor.fetchall()
         conn.commit()
-        conn.close()
         return result

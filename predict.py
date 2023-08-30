@@ -7,9 +7,7 @@ import time
 import argparse  # 命令行模块
 import cv2
 import numpy as np
-import configparser
 from retinaface import Retinaface
-import pymysql
 import base64
 import os
 import multiprocessing
@@ -17,67 +15,20 @@ import logging
 import operate_mysql
 import logging.config
 
+# 引入数据库类，确定要插入的表名
+do_mysql = operate_mysql.do_mysql()
+table_name = 'face_recognition'
 logging.config.fileConfig('logging.config')
 logging = logging.getLogger("applog")
 
 
-# 帧对象，包括这一帧的数组，出现帧数，视频速率
-class frame_object(object):
+
+# 定义帧对象，包括这一帧的数组，出现帧数，视频速率
+class frame_object_c(object):
     def __init__(self, frame, number, rate):
         self.frame = frame
         self.frame_num = number
         self.rate = rate
-
-
-# 将数据插入sql
-def insert_value(taskId, name, target_image, appear_time, hit, end_time, task_status):
-    con = configparser.ConfigParser()
-    con.read('./config.ini', encoding='utf-8')
-    section = 'SQL'
-    host = con.get(section, 'host')
-    port = con.getint(section, 'port')
-    user = con.get(section, 'user')
-    password = con.get(section, 'password')
-    database = con.get(section, 'database')
-    charset = con.get(section, 'charset')
-    conn = pymysql.connect(host=host,
-                           port=port,
-                           user=user,
-                           password=password,
-                           database=database,
-                           charset=charset,
-                           )
-    cursor = conn.cursor()
-    sql = "select * from face_identify_result where taskId='%s'" % (taskId)
-    logging.debug(task_status)
-    try:
-        cursor.execute(sql)
-        results = cursor.fetchall()
-        if len(results) == 0:
-            logging.error("初始化任务记录taskId:{}不存在".format(taskId))
-        if task_status == -1:
-            sql = "update face_identify_result set task_status = %s" % (task_status)
-            cursor.execute(sql)
-        appear_time_saved = results[0][4]
-        if appear_time_saved is None or appear_time is None:
-            logging.debug("捕获目标{}出现时间{}插入数据库".format(name, appear_time))
-            sql = "update face_identify_result set name=%s, target_image=%s, " \
-                  "appear_time=%s, hit =%s, " \
-                  "end_time=%s, task_status=%s where taskId = %s"
-            values = (name, target_image, appear_time, hit, end_time, task_status, taskId)
-            cursor.execute(sql, values)
-        else:
-            if appear_time_saved > appear_time:
-                logging.debug("更新目标{}首次出现时间{}".format(name, appear_time))
-                sql = "update face_identify_result set name=%s, target_image=%s, " \
-                      "appear_time=%s, " \
-                      "end_time=%s, task_status=%s where taskId = %s"
-                values = (name, target_image, appear_time, end_time, task_status, taskId)
-                cursor.execute(sql, values)
-    except Exception as e:
-        logging.error(f"MYSQL ERROR: {e} with sql: {sql}")
-    conn.commit()
-    conn.close()
 
 
 # 参数检验
@@ -105,6 +56,7 @@ def image_compress_encoding(image):
 
 
 def video_spilt(queue, stop_event, error_event, video_path):
+    logging.debug("进程{}拆分视频".format(os.getpid()))
     try:
         logging.debug("进程{}拆分视频".format(os.getpid()))
         capture = cv2.VideoCapture(video_path)
@@ -121,7 +73,7 @@ def video_spilt(queue, stop_event, error_event, video_path):
         frame_num = 0  # frame_num 总帧数
         while True:
             ref, frame = capture.read()
-            frame_object = frame_object(frame, frame_num, rate)
+            frame_object = frame_object_c(frame, frame_num, rate)
             # 视频结束退出
             if not ref:
                 break
@@ -138,12 +90,15 @@ def video_spilt(queue, stop_event, error_event, video_path):
     except Exception as e:
         error_event.set()
         logging.error(e)
+        task_status = -1
+        wrong_message = str(e)
+        do_mysql.insert_dict(face_recognition, taskId=taskId, name=None, appear_time=None, task_status=task_status)
 
 
-def predict_function(queue, stop_event, error_event, lock, mode, video_path=None,
+def predict_function(queue, stop_event, error_event, mode, video_path=None,
                      taskId=None, facenet_threhold=0.9, npy_target_path=None, device=False,
                      ):
-    try:
+
         hit = 0
         paramater_check(video_path, npy_target_path, taskId)
         retinaface = Retinaface(npy_save_path=npy_target_path, device=device)
@@ -229,12 +184,12 @@ def predict_function(queue, stop_event, error_event, lock, mode, video_path=None
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 # 进行检测
                 frame, names = retinaface.detect_image(frame, facenet_threhold)
+                frame = np.array(frame)
+                # RGBtoBGR满足opencv显示格式
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 for name in names:
                     if name != "Unknown":
                         task_status = 1
-                        frame = np.array(frame)
-                        # RGBtoBGR满足opencv显示格式
-                        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                         # cv2.imwrite(dir_save_path, frame)
                         hit = 1
                         # 将文件由cv2数组编码为字符串
@@ -242,17 +197,20 @@ def predict_function(queue, stop_event, error_event, lock, mode, video_path=None
                         end_time = round(time.time())
                         appear_time = frame_object.frame_num / frame_object.rate
                         logging.info("进程{}捕获目标人物{},时间{}s".format(os.getpid(), name, appear_time))
-                        insert_value(taskId, name, target_image, appear_time, hit, end_time, task_status)
+                        do_mysql.insert_dict(table_name, taskId=taskId, name=name, target_image=target_image,
+                                             appear_time=appear_time, hit=hit, end_time=end_time,
+                                             task_status=task_status)
                         break
+                # 显示视频
+                # cv2.imshow('video',frame)
+                # cv2.waitKey(1)
                 if hit == 1:
                     stop_event.set()
                     logging.debug("进程{}跳出".format(os.getpid()))
                     break
         else:
             raise AssertionError("Please specify the correct mode: 'predict', 'video', 'fps' or 'dir_predict'.")
-    except Exception as e:
-        logging.error(e)
-        error_event.set()
+
 
 
 if __name__ == "__main__":
@@ -269,7 +227,7 @@ if __name__ == "__main__":
         parser.add_argument('-facenet_threhold', '--facenet_threhold', type=float, default=0.9,
                             help='facenet_threhold high:0.5 middle:0.7 low:0.9')
         parser.add_argument('-npy_target_path', '--npy_target_path', type=str, default=None, help='the path of npy')
-        parser.add_argument('-num_workers', '--num_workers', type=int, default=2, help='the number of process')
+        parser.add_argument('-num_workers', '--num_workers', type=int, default=1, help='the number of process')
         parser.add_argument('-device', '--device', type=str, default="cuda", help='指定显卡 "cuda:显卡编号",指定cpu "cpu"')
         # 接受传入的参数
         args = parser.parse_args()
@@ -289,7 +247,8 @@ if __name__ == "__main__":
                                              args=(queue, stop_event, error_event, args.mode, args.video_path,
                                                    args.taskId,
                                                    args.facenet_threhold, args.npy_target_path, args.device))
-
+            worker.start()
+            workers.append(worker)
             if not split_pro.is_alive():
                 break
         split_pro.join()
@@ -302,18 +261,18 @@ if __name__ == "__main__":
         # 如果拆分子进程中途发生错误，将任务状态设为-1，并插入数据库
         if error_event.is_set():
             task_status = -1
-            insert_value(taskId=args.taskId, name=None, target_image=None, appear_time=None,
-                         hit=0, end_time=None, task_status=task_status)
+            do_mysql.insert_dict(table_name, taskId=args.taskId, name=None, target_image=None, appear_time=None,
+                                 hit=0, end_time=None, task_status=task_status)
         # 如果没找到目标人物，将任务状态设为1，并插入数据库
         elif not stop_event.is_set():
             logging.info("任务{},未找到目标,预测结束".format(args.taskId))
             task_status = 1
             logging.debug(stop_event.is_set())
-            insert_value(taskId=args.taskId, name=None, target_image=None, appear_time=None,
-                         hit=0, end_time=et, task_status=task_status)
+            do_mysql.insert_dict(table_name, taskId=args.taskId, name=None, target_image=None, appear_time=None,
+                                 hit=0, end_time=et, task_status=task_status)
         # 如果程序中途发生错误，将任务状态设为-1，并插入数据库
     except Exception as e:
         task_status = -1
         logging.error(e)
-        insert_value(taskId=args.taskId, name=None, target_image=None, appear_time=None,
-                     hit=0, end_time=None, task_status=task_status)
+        do_mysql.insert_dict(table_name, taskId=args.taskId, name=None, target_image=None, appear_time=None,
+                             hit=0, end_time=None, task_status=task_status)

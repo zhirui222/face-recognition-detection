@@ -47,11 +47,11 @@ class Retinaface(object):
         # ----------------------------------------------------------------------#
         #   retinaface训练完的权值路径
         # ----------------------------------------------------------------------#
-        "retinaface_model_path": 'model_data/Retinaface_resnet50.pth',
+        "retinaface_model_path": 'model_data/Retinaface_mobilenet0.25.pth',
         # ----------------------------------------------------------------------#
         #   retinaface所使用的主干网络，有mobilenet和resnet50
         # ----------------------------------------------------------------------#
-        "retinaface_backbone": "resnet50",
+        "retinaface_backbone": "mobilenet",
         # ----------------------------------------------------------------------#
         #   retinaface中只有得分大于置信度的预测框会被保留下来
         # ----------------------------------------------------------------------#
@@ -76,11 +76,11 @@ class Retinaface(object):
         # ----------------------------------------------------------------------#
         #   facenet训练完的权值路径
         # ----------------------------------------------------------------------#
-        "facenet_model_path": 'model_data/facenet_inception_resnetv1.pth',
+        "facenet_model_path": 'model_data/facenet_mobilenet.pth',
         # ----------------------------------------------------------------------#
         #   facenet所使用的主干网络， mobilenet和inception_resnetv1
         # ----------------------------------------------------------------------#
-        "facenet_backbone": "inception_resnetv1",
+        "facenet_backbone": "mobilenet",
         # ----------------------------------------------------------------------#
         #   facenet所使用到的输入图片大小
         # ----------------------------------------------------------------------#
@@ -127,7 +127,8 @@ class Retinaface(object):
         self.anchors = Anchors(self.cfg, image_size=(
             self.retinaface_input_shape[0], self.retinaface_input_shape[1])).get_anchors()
         self.generate()
-
+        print("{npy_save_path}/{backbone}_face_encoding.npy".format(backbone=self.facenet_backbone,
+                                                                      npy_save_path=npy_save_path))
         try:
             self.known_face_encodings = np.load(
                 "{npy_save_path}/{backbone}_face_encoding.npy".format(backbone=self.facenet_backbone,
